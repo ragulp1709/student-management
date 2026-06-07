@@ -1,273 +1,450 @@
 <script>
+  import { onMount } from "svelte";
+  import { graphQLRequest } from "./lib/api.js";
+
+  const studentFields = `
+    id
+    name
+    grade
+    department
+    age
+  `;
+
   let students = [];
-
-
   let name = "";
   let grade = "";
   let department = "";
   let age = "";
-
-
   let filterDept = "";
-  let sortByAge = false;
+  let sortBy = "name";
+  let loading = true;
+  let creating = false;
+  let activeStudentId = "";
+  let activeAction = "";
+  let errorMessage = "";
+  let successMessage = "";
 
-  const API_URL = "http://localhost:4000/graphql";
+  $: filteredStudents = students
+    .filter(student =>
+      student.department.toLowerCase().includes(filterDept.trim().toLowerCase())
+    )
+    .sort((left, right) => {
+      if (sortBy === "age") {
+        return left.age - right.age || left.name.localeCompare(right.name);
+      }
 
+      if (sortBy === "department") {
+        return (
+          left.department.localeCompare(right.department) ||
+          left.name.localeCompare(right.name)
+        );
+      }
 
-  async function fetchStudents() {
-    const res = await fetch(API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: `
-          query {
-            students {
-              id
-              name
-              grade
-              department
-              age
-            }
-          }
-        `
-      })
+      return left.name.localeCompare(right.name);
     });
 
-    const json = await res.json();
-    students = json.data.students;
+  onMount(() => {
+    fetchStudents();
+  });
+
+  function clearFeedback() {
+    errorMessage = "";
+    successMessage = "";
   }
 
+  function validateStudent(student) {
+    const cleanedStudent = {
+      name: student.name.trim(),
+      grade: student.grade.trim(),
+      department: student.department.trim(),
+      age: Number(student.age)
+    };
 
-  async function addStudent() {
-    if (!name || !grade || !department || !age) return;
+    if (
+      !cleanedStudent.name ||
+      !cleanedStudent.grade ||
+      !cleanedStudent.department
+    ) {
+      throw new Error("Name, grade, and department are required.");
+    }
 
-    await fetch(API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: `
-          mutation ($name: String!, $grade: String!, $department: String!, $age: Int!) {
+    if (
+      !Number.isInteger(cleanedStudent.age) ||
+      cleanedStudent.age < 1 ||
+      cleanedStudent.age > 120
+    ) {
+      throw new Error("Age must be a whole number between 1 and 120.");
+    }
+
+    return cleanedStudent;
+  }
+
+  async function fetchStudents() {
+    loading = true;
+    clearFeedback();
+
+    try {
+      const data = await graphQLRequest(`
+        query Students {
+          students {
+            ${studentFields}
+          }
+        }
+      `);
+
+      students = data.students;
+    } catch (error) {
+      errorMessage = error.message;
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function addStudent(event) {
+    event.preventDefault();
+    clearFeedback();
+
+    let input;
+    try {
+      input = validateStudent({ name, grade, department, age });
+    } catch (error) {
+      errorMessage = error.message;
+      return;
+    }
+
+    creating = true;
+
+    try {
+      const data = await graphQLRequest(
+        `
+          mutation CreateStudent(
+            $name: String!
+            $grade: String!
+            $department: String!
+            $age: Int!
+          ) {
             createStudent(
               name: $name
               grade: $grade
               department: $department
               age: $age
             ) {
-              id
+              ${studentFields}
             }
           }
         `,
-        variables: {
-          name,
-          grade,
-          department,
-          age: Number(age)
-        }
-      })
-    });
+        input
+      );
 
-    name = "";
-    grade = "";
-    department = "";
-    age = "";
-
-    fetchStudents();
+      students = [...students, data.createStudent];
+      name = "";
+      grade = "";
+      department = "";
+      age = "";
+      successMessage = `${data.createStudent.name} was added.`;
+    } catch (error) {
+      errorMessage = error.message;
+    } finally {
+      creating = false;
+    }
   }
 
+  async function updateStudent(student) {
+    clearFeedback();
 
-  async function deleteStudent(id) {
-    await fetch(API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: `
-          mutation ($id: ID!) {
+    let input;
+    try {
+      input = validateStudent(student);
+    } catch (error) {
+      errorMessage = error.message;
+      return;
+    }
+
+    activeStudentId = student.id;
+    activeAction = "update";
+
+    try {
+      const data = await graphQLRequest(
+        `
+          mutation UpdateStudent(
+            $id: ID!
+            $name: String
+            $grade: String
+            $department: String
+            $age: Int
+          ) {
+            updateStudent(
+              id: $id
+              name: $name
+              grade: $grade
+              department: $department
+              age: $age
+            ) {
+              ${studentFields}
+            }
+          }
+        `,
+        { id: student.id, ...input }
+      );
+
+      students = students.map(currentStudent =>
+        currentStudent.id === student.id ? data.updateStudent : currentStudent
+      );
+      successMessage = `${data.updateStudent.name} was updated.`;
+    } catch (error) {
+      errorMessage = error.message;
+    } finally {
+      activeStudentId = "";
+      activeAction = "";
+    }
+  }
+
+  async function deleteStudent(student) {
+    const confirmed = window.confirm(`Delete ${student.name}?`);
+    if (!confirmed) return;
+
+    clearFeedback();
+    activeStudentId = student.id;
+    activeAction = "delete";
+
+    try {
+      await graphQLRequest(
+        `
+          mutation DeleteStudent($id: ID!) {
             deleteStudent(id: $id) {
               id
             }
           }
         `,
-        variables: { id }
-      })
-    });
+        { id: student.id }
+      );
 
-    fetchStudents();
+      students = students.filter(currentStudent => currentStudent.id !== student.id);
+      successMessage = `${student.name} was deleted.`;
+    } catch (error) {
+      errorMessage = error.message;
+    } finally {
+      activeStudentId = "";
+      activeAction = "";
+    }
   }
-
-
-  async function updateStudent(student) {
-    await fetch(API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: `
-          mutation ($id: ID!, $grade: String, $department: String, $age: Int) {
-            updateStudent(
-              id: $id
-              grade: $grade
-              department: $department
-              age: $age
-            ) {
-              id
-            }
-          }
-        `,
-        variables: {
-          id: student.id,
-          grade: student.grade,
-          department: student.department,
-          age: student.age
-        }
-      })
-    });
-  }
-
-  $: filteredStudents = students
-    .filter(s =>
-      filterDept
-        ? s.department.toLowerCase().includes(filterDept.toLowerCase())
-        : true
-    )
-    .sort((a, b) => (sortByAge ? a.age - b.age : 0));
-
-  fetchStudents();
 </script>
 
-<h1>Student Management</h1>
+<svelte:head>
+  <title>Student Management</title>
+  <meta
+    name="description"
+    content="Create, update, filter, and manage student records."
+  />
+</svelte:head>
 
+<main class="app-shell">
+  <header class="hero">
+    <div>
+      <p class="eyebrow">Academic operations</p>
+      <h1>Student Management</h1>
+      <p class="hero-copy">
+        Keep student records current and easy to find from one focused workspace.
+      </p>
+    </div>
 
-<div class="form">
-  <input placeholder="Name" bind:value={name} />
-  <input placeholder="Grade" bind:value={grade} />
-  <input placeholder="Department" bind:value={department} />
-  <input placeholder="Age" type="number" bind:value={age} />
-  <button on:click={addStudent}>Add Student</button>
-</div>
+    <div class="student-count" aria-label={`${students.length} total students`}>
+      <strong>{students.length}</strong>
+      <span>Total students</span>
+    </div>
+  </header>
 
+  <section class="panel create-panel" aria-labelledby="add-student-heading">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">New record</p>
+        <h2 id="add-student-heading">Add a student</h2>
+      </div>
+      <p>All fields are required.</p>
+    </div>
 
-<div class="filters">
-  <input placeholder="Filter by Department" bind:value={filterDept} />
-  <label>
-    <input type="checkbox" bind:checked={sortByAge} />
-    Sort by Age
-  </label>
-</div>
+    <form class="student-form" onsubmit={addStudent}>
+      <label>
+        <span>Name</span>
+        <input
+          bind:value={name}
+          placeholder="e.g. Asha Rao"
+          autocomplete="name"
+          maxlength="100"
+          required
+        />
+      </label>
 
-<table>
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th>Grade</th>
-      <th>Department</th>
-      <th>Age</th>
-      <th>Actions</th>
-    </tr>
-  </thead>
+      <label>
+        <span>Grade</span>
+        <input bind:value={grade} placeholder="e.g. 10" maxlength="100" required />
+      </label>
 
-  <tbody>
-    {#each filteredStudents as s}
-      <tr>
-        <td class="name">{s.name}</td>
+      <label>
+        <span>Department</span>
+        <input
+          bind:value={department}
+          placeholder="e.g. Science"
+          maxlength="100"
+          required
+        />
+      </label>
 
-        <td>
-          <input bind:value={s.grade} />
-        </td>
+      <label>
+        <span>Age</span>
+        <input
+          bind:value={age}
+          type="number"
+          placeholder="e.g. 15"
+          min="1"
+          max="120"
+          step="1"
+          required
+        />
+      </label>
 
-        <td>
-          <input bind:value={s.department} />
-        </td>
+      <button class="primary-button" type="submit" disabled={creating}>
+        {creating ? "Adding..." : "Add student"}
+      </button>
+    </form>
+  </section>
 
-        <td>
-          <input type="number" bind:value={s.age} />
-        </td>
+  {#if errorMessage}
+    <div class="message error-message" role="alert">
+      <span>{errorMessage}</span>
+      <button type="button" onclick={() => (errorMessage = "")}>Dismiss</button>
+    </div>
+  {/if}
 
-        <td class="actions">
-          <button class="update" on:click={() => updateStudent(s)}>
-            Update
-          </button>
-          <button class="delete" on:click={() => deleteStudent(s.id)}>
-            Delete
-          </button>
-        </td>
-      </tr>
-    {/each}
-  </tbody>
-</table>
+  {#if successMessage}
+    <div class="message success-message" role="status">
+      <span>{successMessage}</span>
+      <button type="button" onclick={() => (successMessage = "")}>Dismiss</button>
+    </div>
+  {/if}
 
-<style>
-  h1 {
-    text-align: center;
-    margin-bottom: 20px;
-  }
+  <section class="panel roster-panel" aria-labelledby="student-roster-heading">
+    <div class="section-heading roster-heading">
+      <div>
+        <p class="eyebrow">Directory</p>
+        <h2 id="student-roster-heading">Student roster</h2>
+      </div>
 
-  .form,
-  .filters {
-    display: flex;
-    gap: 10px;
-    justify-content: center;
-    margin-bottom: 15px;
-  }
+      <div class="toolbar">
+        <label class="filter-field">
+          <span>Filter department</span>
+          <input bind:value={filterDept} placeholder="Search department" />
+        </label>
 
-  table {
-    width: 85%;
-    margin: auto;
-    border-collapse: collapse;
-    margin-top: 20px;
-  }
+        <label class="sort-field">
+          <span>Sort by</span>
+          <select bind:value={sortBy}>
+            <option value="name">Name</option>
+            <option value="age">Age</option>
+            <option value="department">Department</option>
+          </select>
+        </label>
 
-  th, td {
-    padding: 10px;
-    text-align: center;
-  }
+        <button
+          class="secondary-button"
+          type="button"
+          onclick={fetchStudents}
+          disabled={loading}
+        >
+          {loading ? "Loading..." : "Refresh"}
+        </button>
+      </div>
+    </div>
 
-  th {
-    border-bottom: 2px solid #555;
-    font-weight: bold;
-  }
+    {#if loading}
+      <div class="empty-state" role="status">Loading student records...</div>
+    {:else if filteredStudents.length === 0}
+      <div class="empty-state">
+        <strong>No students found</strong>
+        <span>
+          {students.length === 0
+            ? "Add the first student using the form above."
+            : "Try a different department filter."}
+        </span>
+      </div>
+    {:else}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Grade</th>
+              <th>Department</th>
+              <th>Age</th>
+              <th><span class="visually-hidden">Actions</span></th>
+            </tr>
+          </thead>
 
-  tr {
-    border-bottom: 1px solid #444;
-  }
-
-  .name {
-    font-weight: bold;
-  }
-
-  input {
-    padding: 6px;
-    width: 90px;
-    background: #2b2b2b;
-    color: white;
-    border: 1px solid #555;
-    border-radius: 4px;
-    text-align: center;
-  }
-
-  .actions {
-    display: flex;
-    gap: 10px;
-    justify-content: center;
-  }
-
-  button {
-    padding: 6px 12px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-weight: bold;
-    border: none;
-  }
-
-  .update {
-    background: #111;
-    color: white;
-  }
-
-  .delete {
-    background: #c0392b;
-    color: white;
-  }
-
-  button:hover {
-    opacity: 0.85;
-  }
-</style>
+          <tbody>
+            {#each filteredStudents as student (student.id)}
+              <tr>
+                <td data-label="Name">
+                  <input
+                    class="table-input name-input"
+                    bind:value={student.name}
+                    aria-label={`Name for ${student.name}`}
+                    maxlength="100"
+                  />
+                </td>
+                <td data-label="Grade">
+                  <input
+                    class="table-input"
+                    bind:value={student.grade}
+                    aria-label={`Grade for ${student.name}`}
+                    maxlength="100"
+                  />
+                </td>
+                <td data-label="Department">
+                  <input
+                    class="table-input department-input"
+                    bind:value={student.department}
+                    aria-label={`Department for ${student.name}`}
+                    maxlength="100"
+                  />
+                </td>
+                <td data-label="Age">
+                  <input
+                    class="table-input age-input"
+                    type="number"
+                    bind:value={student.age}
+                    aria-label={`Age for ${student.name}`}
+                    min="1"
+                    max="120"
+                    step="1"
+                  />
+                </td>
+                <td class="actions" data-label="Actions">
+                  <button
+                    class="update-button"
+                    type="button"
+                    onclick={() => updateStudent(student)}
+                    disabled={activeStudentId === student.id}
+                  >
+                    {activeStudentId === student.id && activeAction === "update"
+                      ? "Saving..."
+                      : "Save"}
+                  </button>
+                  <button
+                    class="delete-button"
+                    type="button"
+                    onclick={() => deleteStudent(student)}
+                    disabled={activeStudentId === student.id}
+                  >
+                    {activeStudentId === student.id && activeAction === "delete"
+                      ? "Deleting..."
+                      : "Delete"}
+                  </button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </section>
+</main>
