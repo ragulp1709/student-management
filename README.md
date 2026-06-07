@@ -31,19 +31,6 @@ Student Management Systems are commonly used to manage student records, attendan
 
 ![Student Management System](screenshots/student-management-preview.png)
 
-## Project Structure
-
-```text
-student-management/
-├── index.html
-├── style.css
-├── script.js
-├── assets/
-├── screenshots/
-│   └── student-management-preview.png
-└── README.md
-```
-
 
 ## Project Objectives
 
