@@ -1,20 +1,17 @@
-require("dotenv").config();
+require("dotenv").config({ quiet: true });
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
-const { graphqlHTTP } = require("express-graphql");
+const { createHandler } = require("graphql-http/lib/use/express");
 const { buildSchema } = require("graphql");
 const Student = require("./models/Student");
 
 const app = express();
-app.use(cors());
-
-
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => console.log(" MongoDB Connected"))
-  .catch(err => console.error(" MongoDB Error:", err));
-
+app.use(
+  cors({
+    origin: process.env.CLIENT_ORIGIN || "http://localhost:5173"
+  })
+);
 
 const schema = buildSchema(`
   type Student {
@@ -49,45 +46,27 @@ const schema = buildSchema(`
   }
 `);
 
-
 const root = {
+  students: async () =>
+    runStudentOperation(() => Student.find().sort({ name: 1 })),
 
-  students: async () => {
-    console.log("Fetching students");
-    return await Student.find();
-  },
-
-
-  createStudent: async ({ name, grade, department, age }) => {
-    console.log("createStudent:", { name, grade, department, age });
-
-    const student = new Student({
-      name,
-      grade,
-      department,
-      age
-    });
-
-    const savedStudent = await student.save();
-    console.log("Student saved:", savedStudent);
-
-    return savedStudent;
-  },
-
+  createStudent: async ({ name, grade, department, age }) =>
+    runStudentOperation(() =>
+      Student.create({ name, grade, department, age })
+    ),
 
   updateStudent: async ({ id, name, grade, department, age }) => {
-    console.log("updateStudent:", id);
-
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (grade !== undefined) updates.grade = grade;
     if (department !== undefined) updates.department = department;
     if (age !== undefined) updates.age = age;
 
-    const updatedStudent = await Student.findByIdAndUpdate(
-      id,
-      updates,
-      { new: true }
+    const updatedStudent = await runStudentOperation(() =>
+      Student.findByIdAndUpdate(id, updates, {
+        new: true,
+        runValidators: true
+      })
     );
 
     if (!updatedStudent) {
@@ -97,11 +76,11 @@ const root = {
     return updatedStudent;
   },
 
-
   deleteStudent: async ({ id }) => {
-    console.log("deleteStudent:", id);
+    const deletedStudent = await runStudentOperation(() =>
+      Student.findByIdAndDelete(id)
+    );
 
-    const deletedStudent = await Student.findByIdAndDelete(id);
     if (!deletedStudent) {
       throw new Error("Student not found");
     }
@@ -110,18 +89,88 @@ const root = {
   }
 };
 
+async function runStudentOperation(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error.name === "CastError") {
+      throw new Error("Invalid student ID");
+    }
 
-app.use(
-  "/graphql",
-  graphqlHTTP({
-    schema,
-    rootValue: root,
-    graphiql: true
-  })
-);
+    if (error.name === "ValidationError") {
+      const message = Object.values(error.errors)
+        .map(validationError => validationError.message)
+        .join(". ");
+      throw new Error(message);
+    }
 
+    console.error("Student operation failed:", error);
+    throw new Error("Unable to complete the student operation");
+  }
+}
 
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}/graphql`);
+app.get("/health", (_request, response) => {
+  const databaseConnected = mongoose.connection.readyState === 1;
+
+  response.status(databaseConnected ? 200 : 503).json({
+    status: databaseConnected ? "ok" : "unavailable",
+    database: databaseConnected ? "connected" : "disconnected"
+  });
 });
+
+app.all("/graphql", createHandler({ schema, rootValue: root }));
+
+const PORT = Number(process.env.PORT) || 4000;
+let server;
+
+async function startServer() {
+  if (!process.env.MONGO_URI) {
+    throw new Error("MONGO_URI is required");
+  }
+
+  await mongoose.connect(process.env.MONGO_URI);
+  console.log("MongoDB connected");
+
+  server = app.listen(PORT, () => {
+    console.log(`Server running at http://localhost:${PORT}/graphql`);
+  });
+
+  return server;
+}
+
+async function shutdown(signal) {
+  console.log(`${signal} received, shutting down`);
+
+  if (server) {
+    await new Promise((resolve, reject) => {
+      server.close(error => (error ? reject(error) : resolve()));
+    });
+  }
+
+  await mongoose.disconnect();
+}
+
+if (require.main === module) {
+  startServer().catch(error => {
+    console.error("Unable to start server:", error.message);
+    process.exitCode = 1;
+  });
+
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, () => {
+      shutdown(signal).catch(error => {
+        console.error("Shutdown failed:", error.message);
+        process.exitCode = 1;
+      });
+    });
+  }
+}
+
+module.exports = {
+  app,
+  root,
+  runStudentOperation,
+  schema,
+  shutdown,
+  startServer
+};
